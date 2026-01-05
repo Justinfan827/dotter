@@ -1,5 +1,6 @@
 import pygame
 import time
+import random
 from network import Server, Client
 
 # Initialize
@@ -20,8 +21,29 @@ GREEN = (100, 255, 100)
 RED = (255, 80, 80)
 GRAY = (100, 100, 100)
 YELLOW = (255, 255, 100)
+PURPLE = (150, 100, 200)
 
 PORT = 5555
+
+
+class Obstacle:
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.color = PURPLE
+
+    def draw(self):
+        pygame.draw.rect(screen, self.color, (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(screen, WHITE, (self.x, self.y, self.width, self.height), 2)
+
+    def to_dict(self):
+        return {"x": self.x, "y": self.y, "width": self.width, "height": self.height}
+
+    @staticmethod
+    def from_dict(data):
+        return Obstacle(data["x"], data["y"], data["width"], data["height"])
 
 
 class Player:
@@ -42,9 +64,12 @@ class Player:
         self.y = self.start_y
         self.alive = True
 
-    def move_with_keys(self, keys):
+    def move_with_keys(self, keys, obstacles=None):
         if not self.alive:
             return
+        
+        old_x, old_y = self.x, self.y
+        
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
             self.x -= self.speed
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
@@ -53,13 +78,24 @@ class Player:
             self.y -= self.speed
         if keys[pygame.K_DOWN] or keys[pygame.K_s]:
             self.y += self.speed
+        
+        # Check boundaries
         self.x = max(self.radius, min(WIDTH - self.radius, self.x))
         self.y = max(self.radius, min(HEIGHT - self.radius, self.y))
+        
+        # Check obstacle collisions
+        if obstacles:
+            for obstacle in obstacles:
+                if check_circle_rect_collision(self, obstacle):
+                    self.x, self.y = old_x, old_y
+                    break
 
-    def move_with_input(self, input_data):
+    def move_with_input(self, input_data, obstacles=None):
         """Move based on network input data."""
         if not self.alive or not input_data:
             return
+        
+        old_x, old_y = self.x, self.y
         keys = input_data.get("keys", {})
         if keys.get("left"):
             self.x -= self.speed
@@ -69,8 +105,17 @@ class Player:
             self.y -= self.speed
         if keys.get("down"):
             self.y += self.speed
+        
+        # Check boundaries
         self.x = max(self.radius, min(WIDTH - self.radius, self.x))
         self.y = max(self.radius, min(HEIGHT - self.radius, self.y))
+        
+        # Check obstacle collisions
+        if obstacles:
+            for obstacle in obstacles:
+                if check_circle_rect_collision(self, obstacle):
+                    self.x, self.y = old_x, old_y
+                    break
 
     def draw(self):
         if self.alive:
@@ -108,6 +153,13 @@ class Bullet:
 
     def off_screen(self):
         return self.x < 0 or self.x > WIDTH or self.y < 0 or self.y > HEIGHT
+    
+    def hits_obstacle(self, obstacles):
+        if obstacles:
+            for obstacle in obstacles:
+                if check_circle_rect_collision(self, obstacle):
+                    return True
+        return False
 
     def to_dict(self):
         return {"x": self.x, "y": self.y, "vx": self.vx, "vy": self.vy, "owner": self.owner}
@@ -125,6 +177,59 @@ def check_collision(obj1, obj2):
     dy = obj1.y - obj2.y
     dist = (dx**2 + dy**2) ** 0.5
     return dist < obj1.radius + obj2.radius
+
+
+def check_circle_rect_collision(circle, rect):
+    closest_x = max(rect.x, min(circle.x, rect.x + rect.width))
+    closest_y = max(rect.y, min(circle.y, rect.y + rect.height))
+    dx = circle.x - closest_x
+    dy = circle.y - closest_y
+    return (dx * dx + dy * dy) < (circle.radius * circle.radius)
+
+
+def generate_obstacles(num_obstacles=8):
+    obstacles = []
+    min_size = 40
+    max_size = 100
+    margin = 100
+    
+    attempts = 0
+    while len(obstacles) < num_obstacles and attempts < 1000:
+        width = random.randint(min_size, max_size)
+        height = random.randint(min_size, max_size)
+        x = random.randint(margin, WIDTH - width - margin)
+        y = random.randint(margin, HEIGHT - height - margin)
+        
+        new_obstacle = Obstacle(x, y, width, height)
+        
+        # Check if obstacle blocks player starting positions
+        player1_start = (200, HEIGHT // 2)
+        player2_start = (WIDTH - 200, HEIGHT // 2)
+        
+        valid = True
+        
+        # Check if obstacle overlaps with player starting areas
+        for px, py in [player1_start, player2_start]:
+            player_circle = type('Player', (), {'x': px, 'y': py, 'radius': 30})
+            if check_circle_rect_collision(player_circle, new_obstacle):
+                valid = False
+                break
+        
+        # Check if obstacle overlaps with other obstacles
+        for obs in obstacles:
+            if (new_obstacle.x < obs.x + obs.width and
+                new_obstacle.x + new_obstacle.width > obs.x and
+                new_obstacle.y < obs.y + obs.height and
+                new_obstacle.y + new_obstacle.height > obs.y):
+                valid = False
+                break
+        
+        if valid:
+            obstacles.append(new_obstacle)
+        
+        attempts += 1
+    
+    return obstacles
 
 
 def show_main_menu():
@@ -313,6 +418,7 @@ def run_single_player(num_lives):
     player1.lives = num_lives
     player2.lives = num_lives
     bullets = []
+    obstacles = generate_obstacles()
     last_bot_shot = time.time()
     respawn_time = None  # Track respawn delay
 
@@ -340,7 +446,7 @@ def run_single_player(num_lives):
 
         # Player 1 input
         keys = pygame.key.get_pressed()
-        player1.move_with_keys(keys)
+        player1.move_with_keys(keys, obstacles)
 
         if shoot_target:
             bullets.append(Bullet(player1.x, player1.y, shoot_target[0], shoot_target[1], 0))
@@ -363,7 +469,7 @@ def run_single_player(num_lives):
         # Update bullets
         for bullet in bullets:
             bullet.update()
-        bullets = [b for b in bullets if not b.off_screen()]
+        bullets = [b for b in bullets if not b.off_screen() and not b.hits_obstacle(obstacles)]
 
         # Check bullet-player collisions
         for bullet in bullets[:]:
@@ -388,228 +494,8 @@ def run_single_player(num_lives):
 
         # Draw
         screen.fill(BLACK)
-        player1.draw()
-        player2.draw()
-        for bullet in bullets:
-            bullet.draw()
-
-        # HUD with lives
-        p1_text = font.render(f"YOU (Blue) - Lives: {player1.lives}", True, BLUE)
-        p2_text = font.render(f"BOT (Green) - Lives: {player2.lives}", True, GREEN)
-        screen.blit(p1_text, (10, 10))
-        screen.blit(p2_text, (WIDTH - p2_text.get_width() - 10, 10))
-
-        pygame.display.flip()
-        clock.tick(60)
-
-
-def run_host_game(num_lives):
-    """Host a multiplayer game."""
-    server = Server(PORT)
-
-    # Show waiting screen while accepting connection
-    show_waiting_screen(f"Hosting on port {PORT}... Run: ngrok tcp {PORT}")
-
-    # Non-blocking accept with escape check
-    server.socket.settimeout(0.1)
-    try:
-        server.socket.bind(("0.0.0.0", PORT))
-        server.socket.listen(1)
-    except OSError as e:
-        show_waiting_screen(f"Error: {e}")
-        pygame.time.wait(2000)
-        return None
-
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                server.close()
-                return None
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                server.close()
-                return None
-
-        show_waiting_screen(f"Hosting on port {PORT}... Waiting for player 2")
-
-        try:
-            server.conn, server.addr = server.socket.accept()
-            server.conn.setblocking(False)
-            server.running = True
-            break
-        except socket.timeout:
-            pass
-
-    # Game setup
-    player1 = Player(200, HEIGHT // 2, BLUE)  # Host
-    player2 = Player(WIDTH - 200, HEIGHT // 2, GREEN)  # Client
-    player1.lives = num_lives
-    player2.lives = num_lives
-    bullets = []
-    respawn_time = None
-
-    # Send initial lives to client
-    server.send({"type": "init", "lives": num_lives})
-
-    while server.running:
-        shoot_target = None
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                server.close()
-                return None
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    server.close()
-                    return None
-                if event.key == pygame.K_SPACE and player1.alive:
-                    mx, my = pygame.mouse.get_pos()
-                    shoot_target = (mx, my)
-
-        # Handle respawn delay
-        if respawn_time and time.time() - respawn_time > 1.0:
-            if not player1.alive and player1.lives > 0:
-                player1.respawn()
-            if not player2.alive and player2.lives > 0:
-                player2.respawn()
-            respawn_time = None
-            bullets = []
-
-        # Host input
-        keys = pygame.key.get_pressed()
-        player1.move_with_keys(keys)
-        if shoot_target:
-            bullets.append(Bullet(player1.x, player1.y, shoot_target[0], shoot_target[1], 0))
-
-        # Get client input
-        client_input = server.receive()
-        if client_input:
-            player2.move_with_input(client_input)
-            if client_input.get("shoot") and player2.alive:
-                s = client_input["shoot"]
-                bullets.append(Bullet(player2.x, player2.y, s["tx"], s["ty"], 1))
-
-        # Update bullets
-        for bullet in bullets:
-            bullet.update()
-        bullets = [b for b in bullets if not b.off_screen()]
-
-        # Check collisions
-        for bullet in bullets[:]:
-            if bullet.owner == 0 and player2.alive and check_collision(bullet, player2):
-                player2.lives -= 1
-                player2.alive = False
-                bullets.remove(bullet)
-                if player2.lives > 0:
-                    respawn_time = time.time()
-            elif bullet.owner == 1 and player1.alive and check_collision(bullet, player1):
-                player1.lives -= 1
-                player1.alive = False
-                bullets.remove(bullet)
-                if player1.lives > 0:
-                    respawn_time = time.time()
-
-        # Send game state to client
-        game_state = {
-            "players": [player1.to_dict(), player2.to_dict()],
-            "bullets": [b.to_dict() for b in bullets],
-        }
-        server.send(game_state)
-
-        # Check win condition
-        if player1.lives <= 0 and not player1.alive:
-            server.close()
-            return False
-        if player2.lives <= 0 and not player2.alive:
-            server.close()
-            return True
-
-        # Draw
-        screen.fill(BLACK)
-        player1.draw()
-        player2.draw()
-        for bullet in bullets:
-            bullet.draw()
-
-        p1_text = font.render(f"YOU (Blue) - Lives: {player1.lives}", True, BLUE)
-        p2_text = font.render(f"P2 (Green) - Lives: {player2.lives}", True, GREEN)
-        screen.blit(p1_text, (10, 10))
-        screen.blit(p2_text, (WIDTH - p2_text.get_width() - 10, 10))
-
-        pygame.display.flip()
-        clock.tick(60)
-
-    server.close()
-    return None
-
-
-def run_join_game(address):
-    """Join a multiplayer game as client."""
-    # Parse address
-    try:
-        if ":" in address:
-            host, port_str = address.rsplit(":", 1)
-            port = int(port_str)
-        else:
-            host = address
-            port = PORT
-    except ValueError:
-        show_waiting_screen("Invalid address format")
-        pygame.time.wait(2000)
-        return None
-
-    client = Client()
-    show_waiting_screen(f"Connecting to {host}:{port}...")
-
-    if not client.connect(host, port):
-        show_waiting_screen("Connection failed!")
-        pygame.time.wait(2000)
-        return None
-
-    # As client, we render based on server state
-    player1 = Player(200, HEIGHT // 2, BLUE)  # Host (opponent)
-    player2 = Player(WIDTH - 200, HEIGHT // 2, GREEN)  # Us (client)
-    bullets = []
-
-    while client.running:
-        shoot_data = None
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                client.close()
-                return None
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    client.close()
-                    return None
-                if event.key == pygame.K_SPACE and player2.alive:
-                    mx, my = pygame.mouse.get_pos()
-                    shoot_data = {"tx": mx, "ty": my}
-
-        # Send our input
-        input_data = get_local_input()
-        input_data["shoot"] = shoot_data
-        client.send(input_data)
-
-        # Receive game state
-        state = client.receive()
-        if state:
-            # Skip init messages
-            if state.get("type") == "init":
-                continue
-            player1.from_dict(state["players"][0])
-            player2.from_dict(state["players"][1])
-            bullets = [Bullet.from_dict(b) for b in state.get("bullets", [])]
-
-        # Check win condition (from our perspective as player 2)
-        if player2.lives <= 0 and not player2.alive:
-            client.close()
-            return False  # We lost
-        if player1.lives <= 0 and not player1.alive:
-            client.close()
-            return True  # We won
-
-        # Draw
-        screen.fill(BLACK)
+        for obstacle in obstacles:
+            obstacle.draw()
         player1.draw()
         player2.draw()
         for bullet in bullets:
