@@ -25,12 +25,21 @@ PORT = 5555
 
 
 class Player:
-    def __init__(self, x, y, color):
+    def __init__(self, x, y, color, start_x=None, start_y=None):
         self.x = x
         self.y = y
+        self.start_x = start_x if start_x else x
+        self.start_y = start_y if start_y else y
         self.color = color
         self.radius = 15
         self.speed = 5
+        self.alive = True
+        self.lives = 3  # Default, will be set by game
+
+    def respawn(self):
+        """Reset position after being hit."""
+        self.x = self.start_x
+        self.y = self.start_y
         self.alive = True
 
     def move_with_keys(self, keys):
@@ -68,12 +77,13 @@ class Player:
             pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.radius)
 
     def to_dict(self):
-        return {"x": self.x, "y": self.y, "alive": self.alive}
+        return {"x": self.x, "y": self.y, "alive": self.alive, "lives": self.lives}
 
     def from_dict(self, data):
         self.x = data["x"]
         self.y = data["y"]
         self.alive = data["alive"]
+        self.lives = data.get("lives", self.lives)
 
 
 class Bullet:
@@ -146,16 +156,59 @@ def show_main_menu():
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                return None, None
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_1:
+                    return "single", None
+                if event.key == pygame.K_2:
+                    return "host", None
+                if event.key == pygame.K_3:
+                    return "join", None
+                if event.key == pygame.K_ESCAPE:
+                    return None, None
+        clock.tick(60)
+
+
+def select_lives():
+    """Let the user select number of lives."""
+    while True:
+        screen.fill(BLACK)
+        title = font.render("SELECT NUMBER OF LIVES", True, WHITE)
+        screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 150))
+
+        options = [
+            "",
+            "Press 1 for 1 LIFE",
+            "Press 2 for 2 LIVES",
+            "Press 3 for 3 LIVES",
+            "Press 4 for 5 LIVES",
+            "Press 5 for 10 LIVES",
+            "",
+            "ESC to go back",
+        ]
+        for i, line in enumerate(options):
+            color = GRAY if line == "" else WHITE
+            text = font.render(line, True, color)
+            screen.blit(text, (WIDTH // 2 - text.get_width() // 2, 220 + i * 40))
+
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
                 return None
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_1:
-                    return "single"
+                    return 1
                 if event.key == pygame.K_2:
-                    return "host"
+                    return 2
                 if event.key == pygame.K_3:
-                    return "join"
+                    return 3
+                if event.key == pygame.K_4:
+                    return 5
+                if event.key == pygame.K_5:
+                    return 10
                 if event.key == pygame.K_ESCAPE:
-                    return None
+                    return "back"
         clock.tick(60)
 
 
@@ -253,12 +306,15 @@ def get_local_input():
     }
 
 
-def run_single_player():
+def run_single_player(num_lives):
     """Single player mode - you vs AI (simple bot)."""
     player1 = Player(200, HEIGHT // 2, BLUE)
     player2 = Player(WIDTH - 200, HEIGHT // 2, GREEN)  # Bot
+    player1.lives = num_lives
+    player2.lives = num_lives
     bullets = []
     last_bot_shot = time.time()
+    respawn_time = None  # Track respawn delay
 
     while True:
         shoot_target = None
@@ -272,6 +328,15 @@ def run_single_player():
                 if event.key == pygame.K_SPACE and player1.alive:
                     mx, my = pygame.mouse.get_pos()
                     shoot_target = (mx, my)
+
+        # Handle respawn delay
+        if respawn_time and time.time() - respawn_time > 1.0:
+            if not player1.alive and player1.lives > 0:
+                player1.respawn()
+            if not player2.alive and player2.lives > 0:
+                player2.respawn()
+            respawn_time = None
+            bullets = []  # Clear bullets on respawn
 
         # Player 1 input
         keys = pygame.key.get_pressed()
@@ -303,16 +368,22 @@ def run_single_player():
         # Check bullet-player collisions
         for bullet in bullets[:]:
             if bullet.owner == 0 and player2.alive and check_collision(bullet, player2):
+                player2.lives -= 1
                 player2.alive = False
                 bullets.remove(bullet)
+                if player2.lives > 0:
+                    respawn_time = time.time()
             elif bullet.owner == 1 and player1.alive and check_collision(bullet, player1):
+                player1.lives -= 1
                 player1.alive = False
                 bullets.remove(bullet)
+                if player1.lives > 0:
+                    respawn_time = time.time()
 
         # Check win condition
-        if not player1.alive:
+        if player1.lives <= 0 and not player1.alive:
             return False  # You lose
-        if not player2.alive:
+        if player2.lives <= 0 and not player2.alive:
             return True  # You win
 
         # Draw
@@ -322,9 +393,9 @@ def run_single_player():
         for bullet in bullets:
             bullet.draw()
 
-        # HUD
-        p1_text = font.render("YOU (Blue)", True, BLUE)
-        p2_text = font.render("BOT (Green)", True, GREEN)
+        # HUD with lives
+        p1_text = font.render(f"YOU (Blue) - Lives: {player1.lives}", True, BLUE)
+        p2_text = font.render(f"BOT (Green) - Lives: {player2.lives}", True, GREEN)
         screen.blit(p1_text, (10, 10))
         screen.blit(p2_text, (WIDTH - p2_text.get_width() - 10, 10))
 
@@ -332,7 +403,7 @@ def run_single_player():
         clock.tick(60)
 
 
-def run_host_game():
+def run_host_game(num_lives):
     """Host a multiplayer game."""
     server = Server(PORT)
 
@@ -371,7 +442,13 @@ def run_host_game():
     # Game setup
     player1 = Player(200, HEIGHT // 2, BLUE)  # Host
     player2 = Player(WIDTH - 200, HEIGHT // 2, GREEN)  # Client
+    player1.lives = num_lives
+    player2.lives = num_lives
     bullets = []
+    respawn_time = None
+
+    # Send initial lives to client
+    server.send({"type": "init", "lives": num_lives})
 
     while server.running:
         shoot_target = None
@@ -387,6 +464,15 @@ def run_host_game():
                 if event.key == pygame.K_SPACE and player1.alive:
                     mx, my = pygame.mouse.get_pos()
                     shoot_target = (mx, my)
+
+        # Handle respawn delay
+        if respawn_time and time.time() - respawn_time > 1.0:
+            if not player1.alive and player1.lives > 0:
+                player1.respawn()
+            if not player2.alive and player2.lives > 0:
+                player2.respawn()
+            respawn_time = None
+            bullets = []
 
         # Host input
         keys = pygame.key.get_pressed()
@@ -410,11 +496,17 @@ def run_host_game():
         # Check collisions
         for bullet in bullets[:]:
             if bullet.owner == 0 and player2.alive and check_collision(bullet, player2):
+                player2.lives -= 1
                 player2.alive = False
                 bullets.remove(bullet)
+                if player2.lives > 0:
+                    respawn_time = time.time()
             elif bullet.owner == 1 and player1.alive and check_collision(bullet, player1):
+                player1.lives -= 1
                 player1.alive = False
                 bullets.remove(bullet)
+                if player1.lives > 0:
+                    respawn_time = time.time()
 
         # Send game state to client
         game_state = {
@@ -424,10 +516,10 @@ def run_host_game():
         server.send(game_state)
 
         # Check win condition
-        if not player1.alive:
+        if player1.lives <= 0 and not player1.alive:
             server.close()
             return False
-        if not player2.alive:
+        if player2.lives <= 0 and not player2.alive:
             server.close()
             return True
 
@@ -438,8 +530,8 @@ def run_host_game():
         for bullet in bullets:
             bullet.draw()
 
-        p1_text = font.render("YOU (Blue)", True, BLUE)
-        p2_text = font.render("P2 (Green)", True, GREEN)
+        p1_text = font.render(f"YOU (Blue) - Lives: {player1.lives}", True, BLUE)
+        p2_text = font.render(f"P2 (Green) - Lives: {player2.lives}", True, GREEN)
         screen.blit(p1_text, (10, 10))
         screen.blit(p2_text, (WIDTH - p2_text.get_width() - 10, 10))
 
@@ -501,15 +593,18 @@ def run_join_game(address):
         # Receive game state
         state = client.receive()
         if state:
+            # Skip init messages
+            if state.get("type") == "init":
+                continue
             player1.from_dict(state["players"][0])
             player2.from_dict(state["players"][1])
-            bullets = [Bullet.from_dict(b) for b in state["bullets"]]
+            bullets = [Bullet.from_dict(b) for b in state.get("bullets", [])]
 
         # Check win condition (from our perspective as player 2)
-        if not player2.alive:
+        if player2.lives <= 0 and not player2.alive:
             client.close()
             return False  # We lost
-        if not player1.alive:
+        if player1.lives <= 0 and not player1.alive:
             client.close()
             return True  # We won
 
@@ -520,8 +615,8 @@ def run_join_game(address):
         for bullet in bullets:
             bullet.draw()
 
-        p1_text = font.render("P1 (Blue)", True, BLUE)
-        p2_text = font.render("YOU (Green)", True, GREEN)
+        p1_text = font.render(f"P1 (Blue) - Lives: {player1.lives}", True, BLUE)
+        p2_text = font.render(f"YOU (Green) - Lives: {player2.lives}", True, GREEN)
         screen.blit(p1_text, (10, 10))
         screen.blit(p2_text, (WIDTH - p2_text.get_width() - 10, 10))
 
@@ -538,16 +633,26 @@ def main():
     socket = socket_module
 
     while True:
-        mode = show_main_menu()
+        mode, _ = show_main_menu()
         if mode is None:
             break
+
+        # For host and single player, select lives
+        num_lives = 3  # Default
+        if mode in ("single", "host"):
+            lives_result = select_lives()
+            if lives_result is None:
+                break
+            if lives_result == "back":
+                continue
+            num_lives = lives_result
 
         result = None
 
         if mode == "single":
-            result = run_single_player()
+            result = run_single_player(num_lives)
         elif mode == "host":
-            result = run_host_game()
+            result = run_host_game(num_lives)
         elif mode == "join":
             address = get_join_address()
             if address is None:
